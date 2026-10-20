@@ -9,7 +9,15 @@ import android.graphics.Color
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.StateListDrawable
+import android.net.ConnectivityManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
+import android.text.Spannable
+import android.text.SpannableStringBuilder
+import android.text.style.ForegroundColorSpan
+import android.text.style.RelativeSizeSpan
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
@@ -27,20 +35,27 @@ import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Collections
+import java.util.Date
+import java.util.Locale
 
 /**
  * A deliberately tiny, fast TV launcher.
  *
- *  - Favourites row at the top. Hold OK on a grid app to pin it.
- *    Hold OK on a favourite to "grab" it, then Left/Right to reorder, OK to drop.
- *  - 6-wide grid of all apps, with a clear focus highlight.
+ *  - Top bar: time + date (left), network status + settings icons (right).
+ *  - Favourites row. Hold OK on a grid app to pin it. Hold OK on a favourite
+ *    to grab it, then Left/Right to reorder, OK to drop.
+ *  - 6-wide grid of all apps, with a clear focus highlight. Scrolling rows
+ *    stay clipped below the divider (no overlap of the favourites).
  *  - Auto-rotating nature wallpaper from Bing's daily image feed (no API key).
  */
 class MainActivity : Activity() {
 
     data class AppInfo(val pkg: String, val label: String, val icon: Drawable, val launch: Intent)
+
+    private val use24Hour = false   // flip to true for 24-hour time
 
     private var allApps: List<AppInfo> = emptyList()
     private lateinit var adapter: AppAdapter
@@ -48,11 +63,21 @@ class MainActivity : Activity() {
     private lateinit var wallpaperView: ImageView
     private lateinit var favRow: LinearLayout
     private lateinit var favHint: TextView
+    private lateinit var clockView: TextView
+    private lateinit var networkIcon: ImageView
 
-    private val favOrder = mutableListOf<String>()   // ordered favourite package names
-    private var movingPkg: String? = null            // the favourite currently "grabbed"
+    private val favOrder = mutableListOf<String>()
+    private var movingPkg: String? = null
 
     private val prefs by lazy { getSharedPreferences("vibe", Context.MODE_PRIVATE) }
+
+    private val handler = Handler(Looper.getMainLooper())
+    private val ticker = object : Runnable {
+        override fun run() {
+            updateClock(); updateNetworkIcon()
+            handler.postDelayed(this, 15_000)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -66,6 +91,31 @@ class MainActivity : Activity() {
         }
         val scrim = View(this).apply { setBackgroundColor(0x99000000.toInt()) }
 
+        // ---------- Top bar ----------
+        clockView = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 34f
+            includeFontPadding = false
+        }
+        networkIcon = barIcon(R.drawable.ic_ethernet) { openNetworkSettings() }
+        val settingsIcon = barIcon(R.drawable.ic_settings) { openSettings() }
+        val rightBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(networkIcon)
+            addView(settingsIcon)
+        }
+        val topBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(clockView, LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(rightBar, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT))
+        }
+
+        // ---------- Favourites row ----------
         val favLabel = sectionLabel("Favourites")
         favRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         favHint = TextView(this).apply {
@@ -77,9 +127,11 @@ class MainActivity : Activity() {
             isHorizontalScrollBarEnabled = false
             clipChildren = false
             clipToPadding = false
+            setPadding(0, dp(12), 0, dp(12))
             addView(favRow)
         }
 
+        // ---------- App grid ----------
         val grid = GridView(this).apply {
             numColumns = 6
             verticalSpacing = dp(20)
@@ -87,16 +139,23 @@ class MainActivity : Activity() {
             isVerticalScrollBarEnabled = false
             selector = focusBackground()
             setDrawSelectorOnTop(true)
+            clipToPadding = false
+            setPadding(0, dp(8), 0, dp(8))
             adapter = AppAdapter().also { this@MainActivity.adapter = it }
             setOnItemClickListener { _, _, pos, _ -> launch(allApps[pos]) }
             setOnItemLongClickListener { _, _, pos, _ -> toggleFavourite(allApps[pos]); true }
         }
 
+        // ---------- Content column ----------
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            clipChildren = false
+            clipChildren = true
             val p = dp(32)
             setPadding(p, p, p, p)
+            addView(topBar, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(18) })
             addView(favLabel)
             addView(favHint, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -108,7 +167,7 @@ class MainActivity : Activity() {
             ).apply { bottomMargin = dp(20) })
             addView(divider(), LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(1)
-            ).apply { bottomMargin = dp(24) })
+            ).apply { bottomMargin = dp(20) })
             addView(grid, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         }
@@ -121,10 +180,91 @@ class MainActivity : Activity() {
         setContentView(root)
 
         buildFavouritesRow()
+        updateClock()
         showCachedWallpaper()
         refreshWallpaperAsync()
 
         grid.requestFocus()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        handler.post(ticker)   // start clock + network updates
+    }
+
+    override fun onPause() {
+        super.onPause()
+        handler.removeCallbacks(ticker)
+    }
+
+    // ---------------- Top bar helpers ----------------
+
+    private fun barIcon(resId: Int, onClick: () -> Unit): ImageView = ImageView(this).apply {
+        setImageResource(resId)
+        setColorFilter(Color.WHITE)
+        scaleType = ImageView.ScaleType.FIT_CENTER
+        val pad = dp(10)
+        setPadding(pad, pad, pad, pad)
+        isFocusable = true
+        background = focusBackground()
+        setOnClickListener { onClick() }
+        setOnFocusChangeListener { v, hasFocus ->
+            val s = if (hasFocus) 1.12f else 1f
+            v.animate().scaleX(s).scaleY(s).setDuration(120).start()
+        }
+        layoutParams = LinearLayout.LayoutParams(dp(46), dp(46)).apply { leftMargin = dp(10) }
+    }
+
+    private fun updateClock() {
+        val now = Date()
+        val timeStr = SimpleDateFormat(if (use24Hour) "H:mm" else "h:mm", Locale.getDefault()).format(now)
+        val dateStr = SimpleDateFormat("EEEE, d MMMM", Locale.getDefault()).format(now)
+        val sb = SpannableStringBuilder()
+        sb.append(timeStr)
+        val from = sb.length
+        sb.append("    ").append(dateStr)
+        sb.setSpan(RelativeSizeSpan(0.5f), from, sb.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        sb.setSpan(ForegroundColorSpan(0xFFAEB6C4.toInt()), from, sb.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        clockView.text = sb
+    }
+
+    private fun updateNetworkIcon() {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        @Suppress("DEPRECATION")
+        val info = cm.activeNetworkInfo
+        @Suppress("DEPRECATION")
+        val connected = info != null && info.isConnected
+        @Suppress("DEPRECATION")
+        val type = info?.type ?: -1
+        val res = when {
+            !connected -> R.drawable.ic_wifi_off
+            type == ConnectivityManager.TYPE_ETHERNET -> R.drawable.ic_ethernet
+            type == ConnectivityManager.TYPE_WIFI -> R.drawable.ic_wifi
+            else -> R.drawable.ic_wifi
+        }
+        networkIcon.setImageResource(res)
+        networkIcon.setColorFilter(Color.WHITE)
+        networkIcon.alpha = if (connected) 1f else 0.4f
+    }
+
+    private fun openSettings() {
+        try {
+            startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (e: Exception) { /* no settings activity */ }
+    }
+
+    private fun openNetworkSettings() {
+        val tries = listOf(
+            Settings.ACTION_WIFI_SETTINGS,
+            Settings.ACTION_WIRELESS_SETTINGS,
+            Settings.ACTION_SETTINGS
+        )
+        for (action in tries) {
+            try {
+                startActivity(Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                return
+            } catch (e: Exception) { /* try next */ }
+        }
     }
 
     // ---------------- Favourites ----------------
@@ -180,15 +320,12 @@ class MainActivity : Activity() {
         var cellToFocus: View? = null
         for (app in favApps) {
             val grabbed = app.pkg == movingPkg
-            val cell = makeCell(app, iconSizeDp = 76).apply {
+            val cell = makeCell(app, iconSizeDp = 92).apply {
                 isFocusable = true
                 background = if (grabbed) movingHighlight() else focusBackground()
-                setOnClickListener {
-                    if (movingPkg == app.pkg) stopMoving() else launch(app)
-                }
+                setOnClickListener { if (movingPkg == app.pkg) stopMoving() else launch(app) }
                 setOnLongClickListener {
-                    if (movingPkg == app.pkg) stopMoving() else startMoving(app)
-                    true
+                    if (movingPkg == app.pkg) stopMoving() else startMoving(app); true
                 }
                 setOnFocusChangeListener { v, hasFocus ->
                     val s = if (hasFocus) 1.12f else 1f
@@ -218,7 +355,6 @@ class MainActivity : Activity() {
             if (grabbed) cellToFocus = cell
             favRow.addView(cell)
         }
-        // Keep focus on the grabbed app after a reorder redraw.
         cellToFocus?.let { c -> favRow.post { c.requestFocus() } }
     }
 
@@ -246,6 +382,14 @@ class MainActivity : Activity() {
         addState(intArrayOf(android.R.attr.state_selected), highlight())
         addState(intArrayOf(android.R.attr.state_pressed), highlight())
         addState(intArrayOf(), transparentRounded())
+    }
+
+    /** A thin horizontal line that fades out toward both ends. */
+    private fun divider(): View = View(this).apply {
+        background = GradientDrawable(
+            GradientDrawable.Orientation.LEFT_RIGHT,
+            intArrayOf(0x00FFFFFF, 0x33FFFFFF, 0x00FFFFFF)
+        )
     }
 
     // ---------------- Wallpaper ----------------
@@ -294,7 +438,7 @@ class MainActivity : Activity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (movingPkg != null) stopMoving()   // Back cancels a move; otherwise stay put
+        if (movingPkg != null) stopMoving()
     }
 
     private fun loadApps(): List<AppInfo> {
@@ -319,14 +463,6 @@ class MainActivity : Activity() {
     }
 
     // ---------------- View helpers ----------------
-
-    /** A thin horizontal line that fades out toward both ends. */
-    private fun divider(): View = View(this).apply {
-        background = GradientDrawable(
-            GradientDrawable.Orientation.LEFT_RIGHT,
-            intArrayOf(0x00FFFFFF, 0x33FFFFFF, 0x00FFFFFF)   // transparent -> faint white -> transparent
-        )
-    }
 
     private fun sectionLabel(text: String) = TextView(this).apply {
         this.text = text
