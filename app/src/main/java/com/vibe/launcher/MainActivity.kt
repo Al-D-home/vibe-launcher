@@ -102,12 +102,14 @@ class MainActivity : Activity() {
         val rightBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            clipChildren = false
             addView(networkIcon)
             addView(settingsIcon)
         }
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            clipChildren = false
             addView(clockView, LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             addView(rightBar, LinearLayout.LayoutParams(
@@ -117,7 +119,7 @@ class MainActivity : Activity() {
 
         // ---------- Favourites row ----------
         val favLabel = sectionLabel("Favourites")
-        favRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        favRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; clipChildren = false }
         favHint = TextView(this).apply {
             text = "Hold OK on an app below to pin it here"
             setTextColor(0xFFAAAAAA.toInt())
@@ -149,7 +151,8 @@ class MainActivity : Activity() {
         // ---------- Content column ----------
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            clipChildren = true
+            clipChildren = false
+            clipToPadding = false
             val p = dp(32)
             setPadding(p, p, p, p)
             addView(topBar, LinearLayout.LayoutParams(
@@ -168,8 +171,9 @@ class MainActivity : Activity() {
             addView(divider(), LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(1)
             ).apply { bottomMargin = dp(20) })
-            addView(grid, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(FrameLayout(this@MainActivity).apply {
+                addView(grid, FrameLayout.LayoutParams(-1, -1))
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         }
 
         val root = FrameLayout(this).apply {
@@ -320,7 +324,7 @@ class MainActivity : Activity() {
         var cellToFocus: View? = null
         for (app in favApps) {
             val grabbed = app.pkg == movingPkg
-            val cell = makeCell(app, iconSizeDp = 92).apply {
+            val cell = makeCell(app, iconSizeDp = 76).apply {
                 isFocusable = true
                 background = if (grabbed) movingHighlight() else focusBackground()
                 setOnClickListener { if (movingPkg == app.pkg) stopMoving() else launch(app) }
