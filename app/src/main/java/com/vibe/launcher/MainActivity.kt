@@ -8,15 +8,13 @@ import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.StateListDrawable
 import android.os.Bundle
-import android.text.Editable
-import android.text.TextWatcher
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
-import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.GridView
 import android.widget.HorizontalScrollView
@@ -34,18 +32,16 @@ import java.util.Calendar
  * A deliberately tiny, fast TV launcher.
  *
  *  - Favourites row pinned at the top (hold OK on any app to add/remove it).
- *  - Live search box.
- *  - Grid of all your apps.
+ *  - Grid of all your apps, with a clear focus highlight.
  *  - Auto-rotating nature wallpaper from Bing's daily image feed (no API key).
  *
- * No recommendation rows, no ads, no background services. That's the speed.
+ * No search bar, no recommendation rows, no ads, no background services.
  */
 class MainActivity : Activity() {
 
     data class AppInfo(val pkg: String, val label: String, val icon: Drawable, val launch: Intent)
 
     private var allApps: List<AppInfo> = emptyList()
-    private var shownApps: List<AppInfo> = emptyList()
     private lateinit var adapter: AppAdapter
 
     private lateinit var wallpaperView: ImageView
@@ -58,14 +54,13 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
 
         allApps = loadApps()
-        shownApps = allApps
 
         // ---------- Wallpaper (behind everything) ----------
         wallpaperView = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
             setBackgroundColor(Color.BLACK)
         }
-        val scrim = View(this).apply { setBackgroundColor(0x99000000.toInt()) } // dark overlay for readability
+        val scrim = View(this).apply { setBackgroundColor(0x99000000.toInt()) }
 
         // ---------- Favourites row ----------
         val favLabel = sectionLabel("Favourites")
@@ -77,46 +72,28 @@ class MainActivity : Activity() {
         }
         val favScroller = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
+            clipChildren = false
+            clipToPadding = false
             addView(favRow)
-        }
-
-        // ---------- Search ----------
-        val search = EditText(this).apply {
-            hint = "Search apps"
-            setHintTextColor(0xFF888888.toInt())
-            setTextColor(Color.WHITE)
-            textSize = 18f
-            setSingleLine(true)
-            val p = dp(16)
-            setPadding(p, p, p, p)
-            background = GradientDrawable().apply {
-                cornerRadius = dp(10).toFloat()
-                setColor(0xCC1A1A1A.toInt())
-                setStroke(dp(1), 0xFF444444.toInt())
-            }
-            addTextChangedListener(object : TextWatcher {
-                override fun afterTextChanged(s: Editable?) = filter(s?.toString().orEmpty())
-                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            })
         }
 
         // ---------- App grid ----------
         val grid = GridView(this).apply {
             numColumns = 5
-            verticalSpacing = dp(24)
-            horizontalSpacing = dp(24)
+            verticalSpacing = dp(28)
+            horizontalSpacing = dp(28)
             isVerticalScrollBarEnabled = false
+            selector = focusBackground()          // visible highlight on the focused app
+            setDrawSelectorOnTop(true)            // draw the ring over the icon
             adapter = AppAdapter().also { this@MainActivity.adapter = it }
-            setOnItemClickListener { _, _, pos, _ -> launch(shownApps[pos]) }
-            setOnItemLongClickListener { _, _, pos, _ ->
-                toggleFavourite(shownApps[pos]); true
-            }
+            setOnItemClickListener { _, _, pos, _ -> launch(allApps[pos]) }
+            setOnItemLongClickListener { _, _, pos, _ -> toggleFavourite(allApps[pos]); true }
         }
 
         // ---------- Content column ----------
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            clipChildren = false
             val p = dp(32)
             setPadding(p, p, p, p)
             addView(favLabel)
@@ -127,11 +104,7 @@ class MainActivity : Activity() {
             addView(favScroller, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = dp(20) })
-            addView(search, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = dp(20) })
+            ).apply { bottomMargin = dp(24) })
             addView(grid, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         }
@@ -144,10 +117,10 @@ class MainActivity : Activity() {
         setContentView(root)
 
         buildFavouritesRow()
-        showCachedWallpaper()      // instant, from last download
-        refreshWallpaperAsync()    // fetch today's in the background
+        showCachedWallpaper()
+        refreshWallpaperAsync()
 
-        grid.requestFocus()        // start on the apps, not the search box
+        grid.requestFocus()
     }
 
     // ---------------- Favourites ----------------
@@ -173,16 +146,42 @@ class MainActivity : Activity() {
         val favApps = allApps.filter { favs.contains(it.pkg) }
         favHint.visibility = if (favApps.isEmpty()) View.VISIBLE else View.GONE
         for (app in favApps) {
-            favRow.addView(makeCell(app, big = true).apply {
+            val cell = makeCell(app, big = true).apply {
                 isFocusable = true
+                background = focusBackground()
                 setOnClickListener { launch(app) }
-                val lp = LinearLayout.LayoutParams(
+                setOnLongClickListener { toggleFavourite(app); true }
+                setOnFocusChangeListener { v, hasFocus ->
+                    val s = if (hasFocus) 1.12f else 1f
+                    v.animate().scaleX(s).scaleY(s).setDuration(120).start()
+                }
+                layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
                 ).apply { rightMargin = dp(16) }
-                layoutParams = lp
-            })
+            }
+            favRow.addView(cell)
         }
+    }
+
+    // ---------------- Focus highlight ----------------
+
+    private fun highlight(): GradientDrawable = GradientDrawable().apply {
+        cornerRadius = dp(14).toFloat()
+        setColor(0x3300C2FF.toInt())           // faint cyan tint
+        setStroke(dp(3), 0xFF00C2FF.toInt())    // bright cyan ring
+    }
+
+    private fun transparentRounded(): GradientDrawable = GradientDrawable().apply {
+        cornerRadius = dp(14).toFloat()
+        setColor(Color.TRANSPARENT)
+    }
+
+    private fun focusBackground(): StateListDrawable = StateListDrawable().apply {
+        addState(intArrayOf(android.R.attr.state_focused), highlight())
+        addState(intArrayOf(android.R.attr.state_selected), highlight())
+        addState(intArrayOf(android.R.attr.state_pressed), highlight())
+        addState(intArrayOf(), transparentRounded())
     }
 
     // ---------------- Wallpaper ----------------
@@ -191,26 +190,18 @@ class MainActivity : Activity() {
 
     private fun showCachedWallpaper() {
         val f = wallpaperFile()
-        if (f.exists()) {
-            BitmapFactory.decodeFile(f.absolutePath)?.let { wallpaperView.setImageBitmap(it) }
-        }
+        if (f.exists()) BitmapFactory.decodeFile(f.absolutePath)?.let { wallpaperView.setImageBitmap(it) }
     }
 
     private fun refreshWallpaperAsync() {
         Thread {
             try {
-                // Bing's recent daily images (up to 8). Curated nature/photography, no key.
-                val feed = httpGet(
-                    "https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=8&mkt=en-US"
-                )
+                val feed = httpGet("https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=8&mkt=en-US")
                 val images = JSONObject(feed).getJSONArray("images")
                 if (images.length() == 0) return@Thread
-                // Pick one by day-of-year so it changes automatically each day.
                 val day = Calendar.getInstance().get(Calendar.DAY_OF_YEAR)
                 val chosen = images.getJSONObject(day % images.length())
-                val urlBase = chosen.getString("urlbase")      // e.g. /th?id=OHR.Name_EN-US123
-                val imageUrl = "https://www.bing.com$urlBase" + "_1920x1080.jpg"
-
+                val imageUrl = "https://www.bing.com" + chosen.getString("urlbase") + "_1920x1080.jpg"
                 val conn = (URL(imageUrl).openConnection() as HttpURLConnection).apply {
                     connectTimeout = 8000; readTimeout = 12000
                 }
@@ -219,9 +210,7 @@ class MainActivity : Activity() {
                 }
                 val bmp: Bitmap? = BitmapFactory.decodeFile(wallpaperFile().absolutePath)
                 if (bmp != null) runOnUiThread { wallpaperView.setImageBitmap(bmp) }
-            } catch (e: Exception) {
-                // Offline or blocked: keep whatever we already show. Fail silently.
-            }
+            } catch (e: Exception) { /* offline: keep what we have */ }
         }.start()
     }
 
@@ -237,13 +226,6 @@ class MainActivity : Activity() {
 
     private fun launch(app: AppInfo) {
         try { startActivity(app.launch) } catch (e: Exception) { /* uninstalled */ }
-    }
-
-    private fun filter(query: String) {
-        val q = query.trim().lowercase()
-        shownApps = if (q.isEmpty()) allApps
-                    else allApps.filter { it.label.lowercase().contains(q) }
-        adapter.notifyDataSetChanged()
     }
 
     @Deprecated("Deprecated in Java")
@@ -284,7 +266,7 @@ class MainActivity : Activity() {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            val p = dp(12)
+            val p = dp(14)
             setPadding(p, p, p, p)
             addView(ImageView(context).apply {
                 layoutParams = LinearLayout.LayoutParams(size, size)
@@ -309,13 +291,12 @@ class MainActivity : Activity() {
     ).toInt()
 
     inner class AppAdapter : BaseAdapter() {
-        override fun getCount(): Int = shownApps.size
-        override fun getItem(position: Int): Any = shownApps[position]
+        override fun getCount(): Int = allApps.size
+        override fun getItem(position: Int): Any = allApps[position]
         override fun getItemId(position: Int): Long = position.toLong()
         override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
-            val cell = convertView as? LinearLayout ?: makeCell(shownApps[position], big = false)
-            // rebind (covers recycled cells and filtering)
-            val app = shownApps[position]
+            val cell = convertView as? LinearLayout ?: makeCell(allApps[position], big = false)
+            val app = allApps[position]
             (cell.getChildAt(0) as ImageView).setImageDrawable(app.icon)
             (cell.getChildAt(1) as TextView).text = app.label
             return cell
